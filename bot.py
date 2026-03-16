@@ -12,7 +12,7 @@ from aiohttp import web
 # Load environment variables
 load_dotenv()
 
-# Configuration (only these 4 needed now)
+# Configuration
 def get_env_int(var_name, default=None):
     val = os.getenv(var_name)
     if val and val.strip().lstrip("-").isdigit():
@@ -24,6 +24,9 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PORT = get_env_int("PORT", 8000)
 
+# Busy flag for single task only
+is_busy = False
+
 # Setup Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -34,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- DUMMY WEB SERVER (keeps Render free tier alive) ---
+# --- DUMMY WEB SERVER ---
 async def web_server():
     async def handle(request):
         return web.Response(text="Bot is running!")
@@ -49,37 +52,73 @@ async def web_server():
 @app.on_message(filters.command("start"))
 async def start(client, message):
     await message.reply_text(
-        "✅ **Bot is online!**\n\n"
-        "Usage in group:\n"
-        "`/anime <name> -e <episode> -r <resolution|all>`\n\n"
-        "✅ Files will be sent directly to your DM / Saved Messages."
+        "✅ **Bot A1 is online!**\n\n"
+        "Easy command:\n"
+        "`/a1 <anime name> ep<episode> <resolution>p`\n\n"
+        "Example:\n"
+        "`/a1 solo leveling ep1 720p`\n\n"
+        "✅ File will be sent to your PM.\n"
+        "Forward it to your Saved Messages for safety."
     )
 
-@app.on_message(filters.command("anime"))
-async def anime_download(client, message: Message):
-    command_text = message.text.split(" ", 1)
-    if len(command_text) < 2:
-        await message.reply_text("Usage: /anime <name> -e <episode> -r <resolution|all>")
-        return
+def parse_a1_command(text):
+    words = text.strip().split()
+    if len(words) < 3:
+        return None, None, None
+    
+    res_str = words[-1]
+    if not res_str.endswith("p") or not res_str[:-1].isdigit():
+        return None, None, None
+    resolution = res_str[:-1]
+    
+    # Format 1: name ep1 720p
+    if words[-2].lower().startswith("ep") and words[-2][2:].isdigit():
+        episode = words[-2][2:]
+        anime_name = " ".join(words[:-2])
+        return anime_name, episode, resolution
+    
+    # Format 2: name episode 1 720p
+    if len(words) >= 4 and words[-3].lower() == "episode" and words[-2].isdigit():
+        episode = words[-2]
+        anime_name = " ".join(words[:-3])
+        return anime_name, episode, resolution
+    
+    # Format 3: name ep 1 720p
+    if len(words) >= 4 and words[-3].lower() == "ep" and words[-2].isdigit():
+        episode = words[-2]
+        anime_name = " ".join(words[:-3])
+        return anime_name, episode, resolution
+    
+    return None, None, None
 
-    args = command_text[1]
+@app.on_message(filters.command("a1"))
+async def anime_download(client, message: Message):
+    global is_busy
+    
+    if is_busy:
+        await message.reply_text("❌ This bot is busy right now.\nTry another bot (e.g. /a2)")
+        return
+    
+    is_busy = True
     
     try:
-        if "-e" not in args or "-r" not in args:
-            await message.reply_text("Error: Missing -e or -r flags.")
+        command_text = message.text.split(" ", 1)
+        if len(command_text) < 2:
+            await message.reply_text("Usage: /a1 <anime name> ep<episode> <resolution>p\nExample: /a1 solo leveling ep1 720p")
             return
 
-        parts = args.split("-e")
-        anime_name = parts[0].strip()
-        rest = parts[1].split("-r")
-        episode = rest[0].strip()
-        resolution_arg = rest[1].strip()
+        args = command_text[1]
+        anime_name, episode, resolution_arg = parse_a1_command(args)
+        
+        if not anime_name or not episode:
+            await message.reply_text("Usage: /a1 <anime name> ep<episode> <resolution>p\nExample: /a1 solo leveling ep1 720p")
+            return
 
-        resolutions = ["360", "720", "1080"] if resolution_arg.lower() == "all" else [resolution_arg]
+        resolutions = [resolution_arg]
 
-        status_msg = await message.reply_text(f"Queueing **{anime_name}** Episode **{episode}**...")
+        status_msg = await message.reply_text(f"Queueing **{anime_name}** Episode **{episode}** [{resolution_arg}p]...")
 
-        # --- SELF-REPAIR: Ensure script is executable ---
+        # Ensure script is executable
         script_path = "./animepahe-dl.sh"
         if os.path.exists(script_path):
             st = os.stat(script_path)
@@ -112,12 +151,12 @@ async def anime_download(client, message: Message):
             await process.wait()
             
             if process.returncode != 0:
-                await message.reply_text(f"❌ Failed to download {res}p. (Exit Code: {process.returncode})")
+                await message.reply_text(f"❌ Failed to download {res}p.")
                 continue
 
             files = glob.glob("**/*.mp4", recursive=True)
             if not files:
-                await message.reply_text(f"❌ Download finished, but file not found for {res}p.")
+                await message.reply_text(f"❌ File not found for {res}p.")
                 continue
             
             latest_file = max(files, key=os.path.getctime)
@@ -130,18 +169,17 @@ async def anime_download(client, message: Message):
             except OSError:
                 new_file_path = latest_file
 
-            # Upload directly to user's DM
-            await status_msg.edit_text(f"Uploading {final_filename} to your DM...")
+            await status_msg.edit_text(f"Sending {final_filename} to your PM...")
             try:
                 await app.send_document(
                     chat_id=message.from_user.id,
                     document=new_file_path,
-                    caption=f"{final_filename}\n\n✅ Sent privately via Anime Bot",
+                    caption=f"{final_filename}\n\n✅ Sent to your PM.\nForward this to Saved Messages for safety!",
                     force_document=True
                 )
                 success_count += 1
             except Exception as e:
-                await message.reply_text(f"⚠️ Failed to send to your DM: {e}\nMake sure you started the bot in PM first.")
+                await message.reply_text(f"⚠️ Send failed: {e}\nStart me in PM first (/start)")
 
             # Cleanup
             try:
@@ -153,13 +191,19 @@ async def anime_download(client, message: Message):
                 pass
 
         if success_count == len(resolutions):
-            await status_msg.edit_text("✅ All done! Files sent to your DM.")
+            await status_msg.edit_text("✅ Download done! Check your PM.")
         else:
-            await status_msg.edit_text(f"⚠️ Job finished. {success_count}/{len(resolutions)} sent.")
+            await status_msg.edit_text(f"⚠️ {success_count}/{len(resolutions)} sent.")
 
     except Exception as e:
         logger.error(f"Error: {e}")
         await message.reply_text(f"Error: {str(e)}")
+    
+    finally:
+        # Rest 60 seconds to protect Render free tier
+        await asyncio.sleep(60)
+        is_busy = False
+        await message.reply_text("✅ I am free now!\nYou can use /a1 again.")
 
 if __name__ == "__main__":
     print("Bot Starting...")
