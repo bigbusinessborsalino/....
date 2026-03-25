@@ -58,15 +58,30 @@ def load_users():
             logger.error(f"Could not load users from DB (Check IP Whitelist): {e}")
     else:
         logger.warning("No MONGO_URI — using memory only")
-
 def add_user(user_id):
     global users
-    users.add(user_id) # Save to memory first so the bot works immediately
+    # 1. Update memory immediately so the bot works in this session
+    users.add(user_id) 
+    
+    # 2. Try to save to DB for persistence, but don't block the user if it fails
     if pm_users_col is not None:
         try:
-            pm_users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
+            pm_users_col.update_one(
+                {"user_id": user_id}, 
+                {"$set": {"user_id": user_id}}, 
+                upsert=True
+            )
         except Exception as e:
-            logger.error(f"Failed to save user {user_id} to DB: {e}")
+            logger.error(f"DB Error (User not saved to cloud): {e}")
+
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    if message.chat.type == "private":
+        add_user(message.from_user.id)
+        await message.reply_text("✅ You are now authorized! You can use commands in groups.")
+    else:
+        # If in a group, just show the help message
+        await message.reply_text(f"✅ Bot {BOT_PREFIX.upper()} is active.")
 
 # --- DUMMY WEB SERVER ---
 async def web_server():
