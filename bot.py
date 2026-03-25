@@ -32,8 +32,8 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 # MongoDB + cache
 client = MongoClient(MONGO_URI) if MONGO_URI else None
-db = client["animebot"] if client else None
-pm_users_col = db["pm_users"] if db else None
+db = client["animebot"] if client is not None else None
+pm_users_col = db["pm_users"] if db is not None else None
 users = set()
 is_busy = False
 
