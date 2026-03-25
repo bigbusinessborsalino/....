@@ -49,15 +49,21 @@ app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 def load_users():
     global users
-    if pm_users_col:
-        users = {doc["user_id"] for doc in pm_users_col.find({}, {"user_id": 1})}
-        logger.info(f"Loaded {len(users)} users from MongoDB")
+    # FIX: Use "is not None" for PyMongo objects
+    if pm_users_col is not None:
+        try:
+            users = {doc["user_id"] for doc in pm_users_col.find({}, {"user_id": 1})}
+            logger.info(f"Loaded {len(users)} users from MongoDB")
+        except Exception as e:
+            logger.error(f"Error loading users: {e}")
     else:
         logger.warning("No MONGO_URI — using memory only (lost on restart)")
 
 def add_user(user_id):
+    global users  # FIX: Ensure we update the global set
     users.add(user_id)
-    if pm_users_col:
+    # FIX: Use "is not None" for PyMongo objects
+    if pm_users_col is not None:
         pm_users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
 
 # --- DUMMY WEB SERVER ---
@@ -66,6 +72,8 @@ async def web_server():
         return web.Response(text="Bot is running!")
     server = web.Application()
     server.router.add_get("/", handle)
+    # Filter out health check logs to keep Render logs clean
+    logging.getLogger('aiohttp.access').setLevel(logging.WARNING)
     runner = web.AppRunner(server)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
@@ -107,7 +115,7 @@ def parse_command(text):
 async def start(client, message):
     if message.chat.type == "private":
         add_user(message.from_user.id)
-        await message.reply_text("✅ PM started & saved in MongoDB forever! You can now use the bot in group.")
+        await message.reply_text("✅ PM started & saved! You can now use the bot in groups.")
     else:
         await message.reply_text(
             f"✅ **Bot {BOT_PREFIX.upper()} online!**\n"
@@ -116,7 +124,8 @@ async def start(client, message):
 
 @app.on_message(filters.command("stats") & filters.private & filters.user(ADMIN_ID))
 async def stats_cmd(client, message):
-    count = pm_users_col.count_documents({}) if pm_users_col else len(users)
+    # FIX: Use "is not None" for PyMongo objects
+    count = pm_users_col.count_documents({}) if pm_users_col is not None else len(users)
     await message.reply_text(f"📊 Total users who started the bot: **{count}**")
 
 @app.on_message(filters.command("broadcast") & filters.private & filters.user(ADMIN_ID))
@@ -125,7 +134,8 @@ async def broadcast_cmd(client, message):
         await message.reply_text("Reply to any message you want to broadcast, then type /broadcast")
         return
     sent = 0
-    cursor = pm_users_col.find({}) if pm_users_col else [{"user_id": uid} for uid in users]
+    # FIX: Use "is not None" for PyMongo objects
+    cursor = pm_users_col.find({}) if pm_users_col is not None else [{"user_id": uid} for uid in users]
     for doc in cursor:
         uid = doc["user_id"]
         try:
@@ -139,18 +149,23 @@ async def broadcast_cmd(client, message):
 @app.on_message(filters.command(BOT_PREFIX))
 async def anime_download(client, message: Message):
     global is_busy
+    user_id = message.from_user.id
 
-    if message.from_user.id not in users:
-        bot_user = (await app.get_me()).username
-        await message.reply_text(
-            "❌ Please start me in PM first!",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("Start in PM", url=f"https://t.me/{bot_user}")
-            ]])
-        )
-        return
+    # FIX: Fallback DB check if user is not in memory cache
+    if user_id not in users:
+        if pm_users_col is not None and pm_users_col.find_one({"user_id": user_id}):
+            users.add(user_id)
+        else:
+            bot_user = (await app.get_me()).username
+            await message.reply_text(
+                "❌ Please start me in PM first!",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Start in PM", url=f"https://t.me/{bot_user}")
+                ]])
+            )
+            return
 
-    if not await check_force_sub(message.from_user.id):
+    if not await check_force_sub(user_id):
         buttons = []
         for ch in FORCE_SUB_CHANNELS:
             if ch.startswith("-"):
@@ -238,7 +253,7 @@ async def anime_download(client, message: Message):
             await status_msg.edit_text(f"Sending {final_filename} to your PM...")
             try:
                 await app.send_document(
-                    chat_id=message.from_user.id,
+                    chat_id=user_id,
                     document=new_file_path,
                     caption=f"{final_filename}\n\n✅ Sent to PM.\nForward to Saved Messages!",
                     force_document=True
