@@ -51,19 +51,20 @@ def load_users():
     global users
     if pm_users_col is not None:
         try:
-            # Setting a short timeout so the bot doesn't hang on startup
+            # Short timeout to prevent hanging if DB is unreachable
             users = {doc["user_id"] for doc in pm_users_col.find({}, {"user_id": 1}).max_time_ms(5000)}
             logger.info(f"Loaded {len(users)} users from MongoDB")
         except Exception as e:
-            logger.error(f"Could not load users from DB (Check IP Whitelist): {e}")
+            logger.error(f"Could not load users from DB: {e}")
     else:
         logger.warning("No MONGO_URI — using memory only")
+
 def add_user(user_id):
     global users
     # 1. Update memory immediately so the bot works in this session
     users.add(user_id) 
     
-    # 2. Try to save to DB for persistence, but don't block the user if it fails
+    # 2. Try to save to DB for persistence across restarts
     if pm_users_col is not None:
         try:
             pm_users_col.update_one(
@@ -78,12 +79,28 @@ def add_user(user_id):
 async def start(client, message):
     if message.chat.type == "private":
         add_user(message.from_user.id)
-        await message.reply_text("✅ You are now authorized! You can use commands in groups.")
+        await message.reply_text(
+            "✅ **PM started & Authorized!**\n"
+            "You can now use the bot here or in groups.\n\n"
+            f"Use `/{BOT_PREFIX} <name> ep<episode> <res>p` to download."
+        )
     else:
-        # If in a group, just show the help message
-        await message.reply_text(f"✅ Bot {BOT_PREFIX.upper()} is active.")
+        # Check if the user has ever started the bot in PM
+        if message.from_user.id not in users:
+            bot_user = (await app.get_me()).username
+            await message.reply_text(
+                "❌ Please start me in PM first to authorize your account!",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Start in PM", url=f"https://t.me/{bot_user}")
+                ]])
+            )
+        else:
+            await message.reply_text(
+                f"✅ **Bot {BOT_PREFIX.upper()} online!**\n"
+                f"Command: `/{BOT_PREFIX} <name> ep<episode> <resolution>p`"
+            )
 
-# --- DUMMY WEB SERVER ---
+# --- DUMMY WEB SERVER FOR RENDER ---
 async def web_server():
     async def handle(request):
         return web.Response(text="Bot is running!")
@@ -127,30 +144,18 @@ def parse_command(text):
         return anime_name, episode, resolution
     return None, None, None
 
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    if message.chat.type == "private":
-        add_user(message.from_user.id)
-        await message.reply_text("✅ PM started! You can now use the bot in groups.")
-    else:
-        await message.reply_text(
-            f"✅ **Bot {BOT_PREFIX.upper()} online!**\n"
-            f"Command: /{BOT_PREFIX} <name> ep<episode> <resolution>p"
-        )
-
 @app.on_message(filters.command("stats") & filters.private & filters.user(ADMIN_ID))
 async def stats_cmd(client, message):
     count = len(users)
-    await message.reply_text(f"📊 Total active users in this session: **{count}**")
+    await message.reply_text(f"📊 Total active/authorized users: **{count}**")
 
 @app.on_message(filters.command(BOT_PREFIX))
 async def anime_download(client, message: Message):
     global is_busy
     user_id = message.from_user.id
 
-    # Check memory first
+    # Workflow: Check memory -> Check DB -> Block if neither
     if user_id not in users:
-        # Emergency check: If not in memory, try DB one last time
         found = False
         if pm_users_col is not None:
             try:
@@ -170,6 +175,7 @@ async def anime_download(client, message: Message):
             )
             return
 
+    # Force Sub Check (kept as requested)
     if not await check_force_sub(user_id):
         buttons = []
         for ch in FORCE_SUB_CHANNELS:
@@ -180,24 +186,23 @@ async def anime_download(client, message: Message):
 
     command_text = message.text.split(" ", 1)
     if len(command_text) < 2:
-        await message.reply_text(f"Usage: /{BOT_PREFIX} <name> ep<ep> <res>p")
+        await message.reply_text(f"Usage: `/{BOT_PREFIX} <name> ep<ep> <res>p`")
         return
     
     args = command_text[1]
     anime_name, episode, resolution_arg = parse_command(args)
     if not anime_name:
-        await message.reply_text("❌ Invalid format. Use: `name ep1 720p`")
+        await message.reply_text("❌ Invalid format. Example: `solo leveling ep1 720p`")
         return
 
     if is_busy:
-        await message.reply_text("❌ Bot is busy. Wait a minute.")
+        await message.reply_text("❌ Bot is busy with another download. Please wait.")
         return
     
     is_busy = True
     try:
         status_msg = await message.reply_text(f"Processing **{anime_name}**...")
         
-        # Ensure script is executable
         if os.path.exists("./animepahe-dl.sh"):
             os.chmod("./animepahe-dl.sh", 0o755)
 
@@ -210,13 +215,18 @@ async def anime_download(client, message: Message):
         files = glob.glob("**/*.mp4", recursive=True)
         if files:
             latest_file = max(files, key=os.path.getctime)
-            await app.send_document(chat_id=user_id, document=latest_file, caption=f"✅ {anime_name} Ep {episode}")
+            await app.send_document(
+                chat_id=user_id, 
+                document=latest_file, 
+                caption=f"✅ **{anime_name}**\nEpisode: {episode}\nResolution: {resolution_arg}p"
+            )
             os.remove(latest_file)
-            await status_msg.edit_text("✅ Sent to PM!")
+            await status_msg.edit_text("✅ Sent to your PM!")
         else:
-            await status_msg.edit_text("❌ File not found. Check name/episode.")
+            await status_msg.edit_text("❌ File not found. Check the name/episode and try again.")
 
     except Exception as e:
+        logger.error(f"Download Error: {e}")
         await message.reply_text(f"⚠️ Error: {e}")
     finally:
         is_busy = False
