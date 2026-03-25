@@ -32,8 +32,8 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 # MongoDB + cache
 client = MongoClient(MONGO_URI) if MONGO_URI else None
-db = client["animebot"] if client else None
-pm_users_col = db["pm_users"] if db else None
+db = client["animebot"] if client is not None else None
+pm_users_col = db["pm_users"] if db is not None else None
 users = set()
 is_busy = False
 
@@ -49,7 +49,7 @@ app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 def load_users():
     global users
-    if pm_users_col:
+    if pm_users_col is not None:
         try:
             users = {doc["user_id"] for doc in pm_users_col.find({}, {"user_id": 1})}
             logger.info(f"Loaded {len(users)} users from MongoDB")
@@ -62,7 +62,7 @@ def load_users():
 
 def add_user(user_id):
     users.add(user_id)
-    if pm_users_col:
+    if pm_users_col is not None:
         try:
             pm_users_col.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
             logger.info(f"User {user_id} saved to DB")
@@ -129,7 +129,7 @@ async def start(client, message):
 
 @app.on_message(filters.command("stats") & filters.private & filters.user(ADMIN_ID))
 async def stats_cmd(client, message):
-    count = pm_users_col.count_documents({}) if pm_users_col else len(users)
+    count = pm_users_col.count_documents({}) if pm_users_col is not None else len(users)
     await message.reply_text(f"📊 Total users who started the bot: **{count}**")
 
 @app.on_message(filters.command("broadcast") & filters.private & filters.user(ADMIN_ID))
@@ -138,7 +138,7 @@ async def broadcast_cmd(client, message):
         await message.reply_text("Reply to any message you want to broadcast, then type /broadcast")
         return
     sent = 0
-    cursor = pm_users_col.find({}) if pm_users_col else [{"user_id": uid} for uid in users]
+    cursor = pm_users_col.find({}) if pm_users_col is not None else [{"user_id": uid} for uid in users]
     for doc in cursor:
         uid = doc["user_id"]
         try:
@@ -285,7 +285,7 @@ if __name__ == "__main__":
     print("Bot Starting...")
     load_users()
     # Test DB connection
-    if pm_users_col:
+    if pm_users_col is not None:
         try:
             pm_users_col.count_documents({})
             logger.info("MongoDB connection successful")
